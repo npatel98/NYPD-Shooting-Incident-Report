@@ -1,0 +1,177 @@
+---
+title: "NYPD Shooting Incident Data Report"
+author: "Nikhil Patel"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The NYPD Shooting Incident data report provides a comprehensive list of shooting incidents in NYC dating back to 2006 until the end of the previous calendar year. The data is collected and reviewed quarterly by the Office of Management Analysis and Planning before being published on the NYPD website. Each record contains details about the incident, including location, time, and information about the suspects and victims. This dataset is available to the public and can be used to analyze patterns of shooting and criminal activity in the city. Additional information can be found in the attached data footnotes. This data is recent as of September 2, 2023.
+
+The analysis will focus on demographics of both victims and perpetrators, providing summary statistics on incident counts by season. It will also present incident breakdowns by New York borough. Additionally, a logistic regression model will be employed, utilizing demographics like gender, age, and race to predict future murder rate patterns.
+
+## Step 0: Import Library
+
+```{r libraries, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# install.packages("tidyverse")
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+
+```
+
+## Step 1: Load Data
+
+First, the data will be retrieved from the [United States government data repository](https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic). We will use the `read_csv` to load in the data frame and the `head()` function to view the first 5 rows.
+
+```{r get_nypd_data, message=FALSE, warning=FALSE}
+## Get current Data for the NYPD Shooting Incident (Historic)
+df <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+
+## View first 5 rows
+head(df)
+
+```
+
+Let's review the number of incidents reported in the dataset and the variables available for analysis. It is also important to see what data types each variable is in case we need to adjust for the purposes of our analysis. To accomplish this task, we will use the `glimpse()` function. The `glimpse()` function in the `dplyr` package is used to provide a concise summary of the structure of a data frame or tibble. It offers a quick way to inspect the data by displaying a few rows and columns, along with information about the data types of each column.
+
+```{r data_summary}
+glimpse(df)
+
+```
+
+## Step 2: Tidy and Transform Data
+
+This analysis is going to include a summary of the demographic variables of victims and perpetrators as well as a visual distribution of the dates of the incidents by seasonality and location of the crime by borough. Let's first isolate our variables of interest in our data set. This is going to include **INCIDENT_KEY**, **OCCUR_DATE**, **BORO**, **PERP_AGE_GROUP**, **PERP_SEX**, **PERP_RACE**, **VIC_AGE_GROUP**, **VIC_SEX**, **VIC_RACE**. Then, we will assess the missingness of our data.
+
+```{r tidy_data}
+tidy_df <- df %>%
+  select(INCIDENT_KEY, OCCUR_DATE, BORO, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, VIC_AGE_GROUP, VIC_SEX, VIC_RACE, STATISTICAL_MURDER_FLAG)
+
+lapply(tidy_df, function(x) sum(is.na(x)))
+
+```
+
+We can see that approximately 33% of the incidences have missing perpetrator demographic information. Assessing the missingness of data is important in the data analysis process. For instance, missing data can introduce errors and bias into analyses. There can be many reasons why data may be missing from a data set. In this scenario, perhaps the missing data is a function of an ongoing investigation where the perpetrator has not been caught. All missing data points in these columns will be changed to 'Unknown'.
+
+```{r removing_na}
+tidy_df <- tidy_df %>%
+  replace_na(list(PERP_AGE_GROUP = "Unknown", PERP_SEX = "Unknown", PERP_RACE = 'Unknown'))
+```
+
+Next, to visualize the seasonality distribution of the data, We will need to create a new column describing the season in which the incident occurred. This column will have 4 values (Winter, Spring, Summer, and Fall). Season will be determined by the following criteria: \
+
+  * Winter: December, January, February 
+  * Spring: March, April, May 
+  * Summer: June, July, August 
+  * Fall: September, October, November
+  
+```{r adding_season}
+tidy_df_with_seasons <- tidy_df %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE), # Convert 'Date' to Date object (month-day-year)
+         Month = month(OCCUR_DATE), # Extract the month
+         OCCUR_SEASON = case_when(
+           month(Month) %in% c(12, 1, 2) ~ "Winter",
+           month(Month) %in% c(3, 4, 5) ~ "Spring",
+           month(Month) %in% c(6, 7, 8) ~ "Summer",
+           month(Month) %in% c(9, 10, 11) ~ "Fall",
+  )) %>%
+  select(-Month) %>% # Remove the intermediate 'Month' column
+  select(INCIDENT_KEY, OCCUR_DATE, OCCUR_SEASON, everything()) # Reorder columns
+
+head(tidy_df_with_seasons)
+```
+
+Understanding the data type of each variable is critical to transforming data into the correct format for analysis. Below is a list of variables in which the data type must be changed. \
+
+  * **INCIDENT_KEY**: double \( \rightarrow \) string
+  * **OCCUR_SEASON**: string \( \rightarrow \) factor
+  * **BORO**: string \( \rightarrow \) factor
+  * **PERP_AGE_GROUP**: string \( \rightarrow \) factor
+  * **PERP_SEX**: string \( \rightarrow \) factor
+  * **PERP_RACE**: string \( \rightarrow \) factor
+  * **VIC_AGE_GROUP**: string \( \rightarrow \) factor
+  * **VIC_SEX**: string \( \rightarrow \) factor
+  * **VIC_RACE**: string \( \rightarrow \) factor
+  
+```{r summary_df}
+## Reclassify variables
+tidy_df_with_seasons <- tidy_df_with_seasons %>%
+  mutate(across(
+    c(PERP_AGE_GROUP, PERP_SEX, PERP_RACE, VIC_AGE_GROUP, VIC_SEX, VIC_RACE),
+    ~ case_when(
+      . == "UNKNOWN" ~ "Unknown",
+      . == "U" ~ "Unknown",
+      . == "UNKNOWN" ~ "Unknown",
+      . == "UNKNOWN" ~ "Unknown",
+      . == "U" ~ "Unknown",
+      . == "UNKNOWN" ~ "Unknown",
+      TRUE ~ .
+    )
+  )) %>%
+  mutate(
+    INCIDENT_KEY = as.character(INCIDENT_KEY),
+    OCCUR_SEASON = as.factor(OCCUR_SEASON),
+    BORO = as.factor(BORO),
+    PERP_AGE_GROUP = as.factor(PERP_AGE_GROUP),
+    PERP_SEX = as.factor(PERP_SEX),
+    PERP_RACE = as.factor(PERP_RACE),
+    VIC_AGE_GROUP = as.factor(VIC_AGE_GROUP),
+    VIC_SEX = as.factor(VIC_SEX),
+    VIC_RACE = as.factor(VIC_RACE)
+  ) %>%
+  subset(VIC_AGE_GROUP != "1022" & PERP_AGE_GROUP != "1020" & PERP_AGE_GROUP != "224" & PERP_AGE_GROUP != "940")
+
+## Summary statistics
+summary(tidy_df_with_seasons)
+```
+
+## Step 3: Add Visualization and Analysis
+
+  1) Research Question: What is the distribution of incidents across each season?
+  
+We can see that most of the reported incidents occur during the summer months while the least number of incidents are occurring in the winter months.
+
+```{r seasonality_analysis}
+
+ggplot(tidy_df_with_seasons, aes(x = OCCUR_SEASON, fill = OCCUR_SEASON)) +
+  geom_bar() +
+  scale_fill_manual(values = c(
+  "Spring" = "dark green",
+  "Summer" = "yellow",
+  "Fall" = "dark orange",
+  "Winter" = "blue")) +
+  labs(title = "Frequency of Incidents by Season", x = "Season", y = "Count of Reported Incidents") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+  2) What is the distribution of incidents across boroughs of New York City?
+  
+Brooklyn has the most reported incidents followed by the Bronx, Queens, Manhattan, and Staten Island. 
+
+```{r location_analysis}
+
+ggplot(tidy_df_with_seasons, aes(x = BORO)) +
+  geom_bar() +
+  labs(title = "Frequency of Incidents by Borough", x = "Borough", y = "Count of Reported Incidents") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+  3) Are there any demographic variables for victims that are predictors of an incident being a murder?
+  
+For this analysis, we will utilize a logistic regression model. A logistic regression model is good for predicting the likelihood of a binary outcome. It's like a tool that helps you answer yes-or-no questions or make decisions based on specific factors or characteristics.
+
+The logistic regression coefficients give the change in the log odds of the outcome for a one unit increase in the predictor variable. From the model, we see that `VIC_AGE_GROUP18-24`, `VIC_AGE_GROUP25-44`, `VIC_AGE_GROUP45-64`, `VIC_AGE_GROUP65+`, and `VIC_AGE_GROUPUnknown` were statistically significant. This means, for example, a victim in the age group of 65+, when compared to an individual under 18 years of age, changes the log odds of being murdered by 1.02.
+  
+```{r logistic_regression_analysis}
+
+glm.fit <- glm(STATISTICAL_MURDER_FLAG ~ VIC_AGE_GROUP + VIC_SEX + VIC_RACE, family = binomial, data = tidy_df_with_seasons)
+
+summary(glm.fit)
+```
+
+## Step 4: Identify Bias
+
+When assessing bias, it is important to first look at how the data was collected. Is data being collected from all regions of New York equally or are some areas more or less represented than others? Furthermore, when looking at Perpetrator data, we can see that there are some Unknown values. What is the cause of this and from where are these crimes being committed? When analyzing any data set, it is important to assess the methodology of data collection and determine any shortcomings in the process. Furthermore, it is important to make any insights using data-driven conclusions and eliminating any personal bias. Only then can fair and factual evidence come to light through data analytics.
